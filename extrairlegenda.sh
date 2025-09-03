@@ -46,19 +46,43 @@ for arquivo in "$DIR"/*.mkv; do
         continue
     fi
     
-    # Mostra as faixas encontradas
+    # Detecta qual faixa tem português brasileiro
     echo "📝 Faixas disponíveis:"
     counter=0
+    FAIXA_PORTUGUES=""
+    
     while IFS=',' read -r idx codec lang title; do
         echo "     $counter: $codec, $lang, $title"
+        
+        # Detecta português brasileiro
+        if [[ "$lang" == "por" ]] || [[ "$title" =~ "Brazilian Portuguese" ]] || [[ "$title" =~ "Portuguese" ]]; then
+            if [ -z "$FAIXA_PORTUGUES" ]; then  # Pega a primeira ocorrência
+                FAIXA_PORTUGUES=$counter
+                echo "       🇧🇷 ← Português detectado nesta faixa!"
+            fi
+        fi
+        
         counter=$((counter + 1))
     done < "$temp_info"
     
     rm -f "$temp_info"
     
-    # Tenta extrair legendas em ordem de prioridade
-    # Baseado no seu sucesso anterior, sabemos que faixa 6 é português brasileiro
-    TENTATIVAS=(6 10 9 8 7 5 4 3 2 1 0)
+    # Monta lista de tentativas priorizando a faixa de português
+    TENTATIVAS=()
+    if [ -n "$FAIXA_PORTUGUES" ]; then
+        echo "🎯 Faixa $FAIXA_PORTUGUES identificada como português brasileiro"
+        TENTATIVAS=("$FAIXA_PORTUGUES")
+        # Adiciona outras faixas como fallback (evitando repetir a do português)
+        for f in 6 5 10 9 8 7 4 3 2 1 0; do
+            if [ "$f" != "$FAIXA_PORTUGUES" ]; then
+                TENTATIVAS+=("$f")
+            fi
+        done
+    else
+        echo "⚠️  Português não detectado automaticamente, usando ordem padrão"
+        TENTATIVAS=(6 5 10 9 8 7 4 3 2 1 0)
+    fi
+    
     EXTRAIU=false
     
     for faixa in "${TENTATIVAS[@]}"; do
@@ -68,15 +92,24 @@ for arquivo in "$DIR"/*.mkv; do
         if ffmpeg -i "$arquivo" -map "0:s:$faixa?" -c:s srt "$srt_file" -y -loglevel error 2>/dev/null; then
             # Verifica se o arquivo foi criado e não está vazio
             if [ -s "$srt_file" ]; then
-                echo "✅ Sucesso! Legenda extraída da faixa $faixa"
+                # Verifica se a legenda parece estar em português (evita pegar inglês/francês)
+                AMOSTRA=$(head -50 "$srt_file" | grep -v "^[0-9]*$" | grep -v "^[0-9][0-9]:[0-9][0-9]" | head -10)
                 
-                # Mostra uma amostra da legenda
-                echo "📝 Amostra da legenda:"
-                head -20 "$srt_file" | grep -v "^[0-9]*$" | grep -v "^[0-9][0-9]:[0-9][0-9]" | head -3 | sed 's/^/    /'
-                
-                SUCESSOS=$((SUCESSOS + 1))
-                EXTRAIU=true
-                break
+                # Se a faixa foi detectada como português OU se não tem muitas palavras em inglês
+                if [ "$faixa" == "$FAIXA_PORTUGUES" ] || ! echo "$AMOSTRA" | grep -qi -E "\b(the|and|you|are|this|that|what|with|have|will|from|they|been)\b"; then
+                    echo "✅ Sucesso! Legenda extraída da faixa $faixa"
+                    
+                    # Mostra uma amostra da legenda
+                    echo "📝 Amostra da legenda:"
+                    echo "$AMOSTRA" | head -3 | sed 's/^/    /'
+                    
+                    SUCESSOS=$((SUCESSOS + 1))
+                    EXTRAIU=true
+                    break
+                else
+                    echo "⚠️  Faixa $faixa parece estar em inglês, tentando próxima..."
+                    rm -f "$srt_file" 2>/dev/null
+                fi
             else
                 # Remove arquivo vazio
                 rm -f "$srt_file" 2>/dev/null
